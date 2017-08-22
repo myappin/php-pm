@@ -538,7 +538,7 @@ class ProcessManager
                     /** @var Connection $connection */
                     $connection = $slave['connection'];
 
-                    if ($slave['requests'] >= $this->maxRequests) {
+                    if ($this->maxRequests > 0 && $slave['requests'] >= $this->maxRequests) {
                         $slave['ready'] = false;
                         $this->output->writeln(sprintf('Restart worker #%d because it reached maxRequests of %d', $slave['port'], $this->maxRequests));
                         $connection->close();
