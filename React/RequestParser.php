@@ -17,9 +17,10 @@ class RequestParser extends \React\Http\RequestHeaderParser
     protected function fixHeaderNames(Request $request)
     {
         $headers = $request->getHeaders();
-        foreach ($headers as $name => $v) {
+        foreach ($headers as $name => $value) {
             $newName = str_replace(' ', '-', ucwords(strtolower(str_replace('-', ' ', $name))));
-            $headers[$newName] = $headers[$name];
+            unset($headers[$name]);
+            $headers[$newName] = $value;
         }
 
         if (isset($headers['Content-Type'])) {

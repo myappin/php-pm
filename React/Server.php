@@ -5,7 +5,6 @@ namespace PHPPM\React;
 use Evenement\EventEmitter;
 use React\EventLoop\LoopInterface;
 use React\Socket\Connection;
-use React\Socket\ConnectionException;
 use React\Socket\ServerInterface;
 
 /**
@@ -43,10 +42,16 @@ class Server extends EventEmitter implements ServerInterface
                 'Supported transports are: IPv4, IPv6 and unix:// .'
                 , 1433253311);
         }
-        $this->master = stream_socket_server($localSocket, $errno, $errstr);
+
+        for ($attempts = 10; $attempts; --$attempts, usleep(mt_rand(500, 1000))) {
+            $this->master = @stream_socket_server($localSocket, $errno, $errstr);
+            if ($this->master) {
+                break;
+            }
+        }
         if (false === $this->master) {
             $message = "Could not bind to $localSocket . Error: [$errno] $errstr";
-            throw new ConnectionException($message, $errno);
+            throw new \RuntimeException($message, $errno);
         }
         stream_set_blocking($this->master, 0);
         $this->loop->addReadStream($this->master, function ($master) {
@@ -68,15 +73,30 @@ class Server extends EventEmitter implements ServerInterface
         $this->emit('connection', array($client));
     }
 
-    public function getPort()
+    public function getAddress()
     {
-        $name = stream_socket_get_name($this->master, false);
+        if (!is_resource($this->master)) {
+            return null;
+        }
 
-        return (int) substr(strrchr($name, ':'), 1);
+        $address = stream_socket_get_name($this->master, false);
+
+        // check if this is an IPv6 address which includes multiple colons but no square brackets
+        $pos = strrpos($address, ':');
+        if ($pos !== false && strpos($address, ':') < $pos && substr($address, 0, 1) !== '[') {
+            $port = substr($address, $pos + 1);
+            $address = '[' . substr($address, 0, $pos) . ']:' . $port;
+        }
+
+        return $address;
     }
 
-    public function shutdown()
+    public function close()
     {
+        if (!is_resource($this->master)) {
+            return;
+        }
+
         $this->loop->removeStream($this->master);
         fclose($this->master);
         $this->removeAllListeners();

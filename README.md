@@ -138,7 +138,7 @@ worker is stopped until you release the break point. All other workers are fully
 
 **Note for XDebug and PHPStorm**: Since php-pm uses at least two processes, there are two xdebug instances as well. PHPStorm is per default configured to only accept one connection at a time. You need to increase that. You won't get xdebug working with your application if you don't increase that count.
 
-![Xdebug and PHPStorm](https://dl.dropboxusercontent.com/u/54069263/ppm-github/xdebug-phpstorm.png)
+![Xdebug and PHPStorm](https://raw.githubusercontent.com/php-pm/assets/master/xdebug-phpstorm.png)
 
 In all workers the STDOUT is redirected to the connected client. So take care, `var_dump`, `echo` are not displayed on the console.
 STDERR is not redirected to the client, but to the console. So, for very simple debugging you could use `error_log('hi')` and you'll see it on the console.
@@ -154,7 +154,7 @@ Per default exceptions and errors are only displayed on the console, prettified 
 
 ### Command
 
-![ppm-help](https://dl.dropboxusercontent.com/u/54069263/ppm-github/help-screenshot.png)
+![ppm-help](https://raw.githubusercontent.com/php-pm/assets/master/help-screenshot.png)
 
 Start
 
@@ -168,7 +168,7 @@ cd ~/my/path/to/symfony/
 ./vendor/bin/ppm start
 ```
 
-![ppm-start](https://dl.dropboxusercontent.com/u/54069263/ppm-github/start-command.png)
+![ppm-start](https://raw.githubusercontent.com/php-pm/assets/master/start-command.png)
 
 
 #### Symfony
@@ -209,9 +209,6 @@ For all Wordpress lovers out there: PPM is not going to work with Wordpress due 
 We highly doubt that Wordpress is ever going to be compatible because its architecture is written in a way that makes it
 currently impossible to serve multiple requests in one application process.
 
-Each worker starts its own HTTP Server which listens on port 5501, 5502, 5503 etc. Range is `5501 -> 5500+<workersCount>`.
-You can integrate those workers directly in a load balancer like NGINX or use http://127.0.0.1:8080 directly.
-
 ### Performance (requests/s)
 
 6x4GHz Intel i7, 16GB RAM. 10 concurrent, 1000 total request: `ab -c 10 -n 1000 http://127.0.0.1:8080/`
@@ -236,7 +233,7 @@ https://github.com/bestmomo/laravel5-example
 
 
 <p align="center">
-<img src="https://dl.dropboxusercontent.com/u/54069263/ppm-github/laravel.png" />
+<img src="https://raw.githubusercontent.com/php-pm/assets/master/laravel.png" />
 </p>
 
 ## Issues

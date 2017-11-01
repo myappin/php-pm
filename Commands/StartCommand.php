@@ -21,10 +21,10 @@ class StartCommand extends Command
 
         $this
             ->setName('start')
-            ->addArgument('working-directory', InputArgument::OPTIONAL, 'The root of your application.', './')
             ->setDescription('Starts the server')
+            ->addArgument('working-directory', InputArgument::OPTIONAL, 'The root of your application.', './')
         ;
-        
+
         $this->configurePPMOptions($this);
     }
 
@@ -32,7 +32,8 @@ class StartCommand extends Command
     {
         $config = $this->initializeConfig($input, $output);
 
-        $handler = new ProcessManager($output, $config['port'], $config['host'], $config['workers']);
+        $class = isset($config['processmanager']) ? $config['processmanager'] : ProcessManager::class;
+        $handler = new $class($output, $config['port'], $config['host'], $config['workers']);
 
         $handler->setBridge($config['bridge']);
         $handler->setAppEnv($config['app-env']);
@@ -44,7 +45,7 @@ class StartCommand extends Command
         $handler->setSocketPath($config['socket-path']);
         $handler->setConcurrentRequestsPerWorker($config['concurrent-requests']);
         $handler->setServingStatic($config['static']);
-
+        $handler->setPIDFile($config['pidfile']);
         $handler->run();
     }
 }

@@ -25,7 +25,7 @@ class Client
      */
     protected $connection;
 
-    public function __construct($controllerPort = 5500)
+    public function __construct($controllerPort = ProcessManager::CONTROLLER_PORT)
     {
         $this->controllerPort = $controllerPort;
         $this->loop = Factory::create();
@@ -40,7 +40,19 @@ class Client
             $this->connection->close();
             unset($this->connection);
         }
-        $client = stream_socket_client($this->getControllerSocket());
+
+        $socketUri = $this->getControllerSocket();
+        $client = false;
+        for ($attempts = 10; $attempts; --$attempts, usleep(mt_rand(500, 1000))) {
+            $client = @stream_socket_client($socketUri, $errno, $errstr);
+            if ($client) {
+                break;
+            }
+        }
+        if (!$client) {
+            $message = "Could not bind to $socketUri. Error: [$errno] $errstr";
+            throw new \RuntimeException($message, $errno);
+        }
         $this->connection = new Connection($client, $this->loop);
         return $this->connection;
     }
@@ -95,4 +107,11 @@ class Client
         return $localSocket;
     }
 
+    public function stopProcessManager(callable $callback)
+    {
+        $this->request('stop', [], function($result) use ($callback) {
+            $callback(json_decode($result, true));
+        });
+        $this->loop->run();
+    }
 }

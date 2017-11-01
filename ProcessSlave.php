@@ -6,6 +6,7 @@ namespace PHPPM;
 use PHPPM\React\HttpResponse;
 use PHPPM\React\HttpServer;
 use PHPPM\Debug\BufferingLogger;
+use React\EventLoop\LoopInterface;
 use React\Socket\Connection;
 use Symfony\Component\Debug\ErrorHandler;
 
@@ -28,7 +29,7 @@ class ProcessSlave
     protected $server;
 
     /**
-     * @var \React\EventLoop\LibEventLoop|\React\EventLoop\StreamSelectLoop
+     * @var LoopInterface
      */
     protected $loop;
 
@@ -72,9 +73,23 @@ class ProcessSlave
     protected $inShutdown = false;
 
     /**
+     * Real base path for static files
+     *
+     * @var string
+     */
+    protected $staticBasePath;
+
+    /**
      * @var BufferingLogger
      */
     protected $errorLogger;
+
+    /**
+     * Copy of $_SERVER during bootstrap.
+     *
+     * @var array
+     */
+    protected $baseServer;
 
     protected $logFormat = '[$time_local] $remote_addr - $remote_user "$request" $status $bytes_sent "$http_referer"';
 
@@ -96,6 +111,7 @@ class ProcessSlave
         $this->config = $config;
         $this->appBootstrap = $appBootstrap;
         $this->bridgeName = $bridgeName;
+        $this->baseServer = $_SERVER;
 
         if ($this->config['session_path']) {
             session_save_path($this->config['session_path']);
@@ -168,7 +184,7 @@ class ProcessSlave
             $this->controller->close();
         }
         if ($this->server) {
-            @$this->server->shutdown();
+            @$this->server->close();
         }
         if ($this->loop) {
             $this->sendCurrentFiles();
@@ -217,7 +233,7 @@ class ProcessSlave
     protected function bootstrap($appBootstrap, $appenv, $debug)
     {
         if ($bridge = $this->getBridge()) {
-            $bridge->bootstrap($appBootstrap, $appenv, $debug);
+            $bridge->bootstrap($appBootstrap, $appenv, $debug, $this->loop);
             $this->sendMessage($this->controller, 'ready');
         }
     }
@@ -230,7 +246,9 @@ class ProcessSlave
      */
     public function registerFile($path)
     {
-        $this->watchedFiles[] = $path;
+        if ($this->isDebug()) {
+            $this->watchedFiles[] = $path;
+        }
     }
 
     /**
@@ -239,6 +257,10 @@ class ProcessSlave
      */
     protected function sendCurrentFiles()
     {
+        if (!$this->isDebug()) {
+            return;
+        }
+
         $files = array_merge($this->watchedFiles, get_included_files());
         $flipped = array_flip($files);
 
@@ -261,7 +283,17 @@ class ProcessSlave
         $this->errorLogger = BufferingLogger::create();
         ErrorHandler::register(new ErrorHandler($this->errorLogger));
 
-        $client = stream_socket_client($this->config['controllerHost']);
+        $client = false;
+        for ($attempts = 10; $attempts; --$attempts, usleep(mt_rand(500, 1000))) {
+            $client = @stream_socket_client($this->config['controllerHost'], $errno, $errstr);
+            if ($client) {
+                break;
+            }
+        }
+        if (!$client) {
+            $message = "Could not bind to {$this->config['controllerHost']}. Error: [$errno] $errstr";
+            throw new \RuntimeException($message, $errno);
+        }
         $this->controller = new \React\Socket\Connection($client, $this->loop);
 
         $pcntl = new \MKraemer\ReactPCNTL\PCNTL($this->loop);
@@ -290,15 +322,7 @@ class ProcessSlave
         $port = $this->config['port'];
         $host = $this->config['host'];
 
-        while (true) {
-            try {
-                $this->server->listen($port, $host);
-                break;
-            } catch (\React\Socket\ConnectionException $e) {
-                usleep(500);
-            }
-        }
-
+        $this->server->listen($port, $host);
         $this->sendMessage($this->controller, 'register', ['pid' => getmypid(), 'port' => $port]);
 
         $this->loop->run();
@@ -308,9 +332,7 @@ class ProcessSlave
     {
         $this->bootstrap($this->appBootstrap, $this->config['app-env'], $this->isDebug());
 
-        if ($this->isDebug()) {
-            $this->sendCurrentFiles();
-        }
+        $this->sendCurrentFiles();
     }
 
     /**
@@ -350,9 +372,7 @@ class ProcessSlave
 
             $bridge->onRequest($request, $response);
 
-            if ($this->isDebug()) {
-                $this->sendCurrentFiles();
-            }
+            $this->sendCurrentFiles();
         } else {
             $response->writeHead('404');
             $response->end('No Bridge Defined.');
@@ -372,6 +392,7 @@ class ProcessSlave
 
     protected function prepareEnvironment(\React\Http\Request $request)
     {
+        $_SERVER = $this->baseServer;
         $_SERVER['REQUEST_METHOD'] = $request->getMethod();
         $_SERVER['REQUEST_TIME'] = (int)microtime(true);
         $_SERVER['REQUEST_TIME_FLOAT'] = microtime(true);
@@ -390,7 +411,7 @@ class ProcessSlave
         $_SERVER['REQUEST_URI'] = $request->getPath();
         $_SERVER['DOCUMENT_ROOT'] = isset($_ENV['DOCUMENT_ROOT']) ? $_ENV['DOCUMENT_ROOT'] : getcwd();
         $_SERVER['SCRIPT_NAME'] = isset($_ENV['SCRIPT_NAME']) ? $_ENV['SCRIPT_NAME'] : 'index.php';
-        $_SERVER['SCRIPT_FILENAME'] = $_SERVER['DOCUMENT_ROOT'] . $_SERVER['SCRIPT_NAME'];
+        $_SERVER['SCRIPT_FILENAME'] = rtrim($_SERVER['DOCUMENT_ROOT'], '/') . '/' . $_SERVER['SCRIPT_NAME'];
     }
 
     /**
@@ -401,10 +422,32 @@ class ProcessSlave
      */
     protected function serveStatic(\React\Http\Request $request, HttpResponse $response)
     {
-        $filePath = $this->getBridge()->getStaticDirectory() . $request->getPath();
+        $path = $request->getPath();
+
+        if ($path === '/') {
+            $path = '/index.html';
+        }
+        else {
+            $path = str_replace("\\", '/', $path);
+        }
+
+        if (!isset($this->staticBasePath)) {
+            $this->staticBasePath = realpath($this->getBridge()->getStaticDirectory());
+        }
+        $filePath = realpath($this->staticBasePath . $path);
+
+        if (false === $filePath) {
+            return false;
+        }
+
+        // prevent access outside base path
+        if (strpos($filePath, $this->staticBasePath) !== 0) {
+            $response->writeHead(403);
+            $response->end();
+            return true;
+        }
 
         if (substr($filePath, -4) !== '.php' && is_file($filePath)) {
-
             $mTime = filemtime($filePath);
 
             if (isset($request->getHeaders()['If-Modified-Since'])) {

@@ -5,9 +5,8 @@ namespace PHPPM;
 
 use React\Socket\Connection;
 use Symfony\Component\Console\Output\OutputInterface;
-use Symfony\Component\Process\PhpExecutableFinder;
-use Symfony\Component\Process\ProcessUtils;
 use Symfony\Component\Debug\Debug;
+use Symfony\Component\Process\ProcessUtils;
 
 class ProcessManager
 {
@@ -21,7 +20,7 @@ class ProcessManager
     /**
      * $object_hash => port
      *
-     * @var string[]
+     * @var int[]
      */
     protected $ports = [];
 
@@ -183,6 +182,15 @@ class ProcessManager
      * @var int
      */
     protected $timeout = 30;
+    /**
+     * Location of the file where we're going to store the PID of the master process
+     */
+    protected $pidfile;
+
+    /**
+     * Controller port
+     */
+    const CONTROLLER_PORT = 5500;
 
     /**
      * ProcessManager constructor.
@@ -204,7 +212,7 @@ class ProcessManager
     /**
      * Handles termination signals, so we can gracefully stop all servers.
      */
-    public function shutdown()
+    public function shutdown($graceful = false)
     {
         if ($this->inShutdown) {
             return;
@@ -212,14 +220,18 @@ class ProcessManager
 
         $this->inShutdown = true;
 
+        $this->output->writeln($graceful
+        	? '<info>Shutdown received, exiting.</info>'
+        	: '<error>Termination received, exiting.</error>'
+        );
+
         //this method is also called during startup when something crashed, so
         //make sure we don't operate on nulls.
-        $this->output->writeln('<error>Termination received, exiting.</error>');
         if ($this->controller) {
-            @$this->controller->shutdown();
+            @$this->controller->close();
         }
         if ($this->web) {
-            @$this->web->shutdown();
+            @$this->web->close();
         }
         if ($this->loop) {
             $this->loop->tick();
@@ -236,6 +248,8 @@ class ProcessManager
                 posix_kill($slave['pid'], SIGKILL);
             }
         }
+
+        unlink($this->pidfile);
         exit;
     }
 
@@ -343,6 +357,10 @@ class ProcessManager
         $this->servingStatic = $servingStatic;
     }
 
+    public function setPIDFile($pidfile)
+    {
+        $this->pidfile = $pidfile;
+    }
     /**
      * @return boolean
      */
@@ -377,11 +395,10 @@ class ProcessManager
         $this->controller->on('connection', array($this, 'onSlaveConnection'));
 
         $this->controllerHost = $this->getNewControllerHost();
-        $this->controller->listen(5500, $this->controllerHost);
+        $this->controller->listen(self::CONTROLLER_PORT, $this->controllerHost);
 
-        $this->web = new \React\Socket\Server($this->loop);
+        $this->web = new \React\Socket\Server(sprintf('%s:%d', $this->host, $this->port), $this->loop);
         $this->web->on('connection', array($this, 'onWeb'));
-        $this->web->listen($this->port, $this->host);
 
         $this->tcpConnector = new \React\SocketClient\TcpConnector($this->loop);
 
@@ -390,6 +407,7 @@ class ProcessManager
         $pcntl->on(SIGTERM, [$this, 'shutdown']);
         $pcntl->on(SIGINT, [$this, 'shutdown']);
         $pcntl->on(SIGCHLD, [$this, 'handleSigchld']);
+        $pcntl->on(SIGUSR1, [$this, 'restartWorker']);
 
         if ($this->isDebug()) {
             $this->loop->addPeriodicTimer(0.5, function () {
@@ -401,9 +419,9 @@ class ProcessManager
         $loopClass = (new \ReflectionClass($this->loop))->getShortName();
 
         $this->output->writeln("<info>Starting PHP-PM with {$this->slaveCount} workers, using {$loopClass} ...</info>");
-
+        $this->writePid();
         for ($i = 0; $i < $this->slaveCount; $i++) {
-            $this->newInstance(5501 + $i);
+            $this->newInstance((self::CONTROLLER_PORT+1) + $i);
         }
 
         $this->loop->run();
@@ -416,6 +434,14 @@ class ProcessManager
     {
         $pid = pcntl_waitpid(-1, $status, WNOHANG);
     }
+
+    public function writePid()
+    {
+        $pid = getmypid();
+        file_put_contents($this->pidfile, $pid);
+    }
+
+
 
     /**
      * Handles incoming connections from $this->port. Basically redirects to a slave.
@@ -440,7 +466,7 @@ class ProcessManager
         );
 
         $redirectionTries = 0;
-        $incoming->on('close', function () use (&$redirectionActive, &$redirectionTries, &$connectionOpen){
+        $incoming->on('close', function () use (&$connectionOpen){
             $connectionOpen = false;
         });
 
@@ -471,7 +497,7 @@ class ProcessManager
             $slave['connections']++;
 
             $start = microtime(true);
-            $stream = stream_socket_client($slave['host'], $errno, $errstr, $this->timeout);
+            $stream = @stream_socket_client($slave['host'], $errno, $errstr, $this->timeout);
             if (!$stream || !is_resource($stream)) {
                 //we failed to connect to the worker. Maybe because of timeouts or it is in a crashed state
                 //and is currently dieing.
@@ -508,7 +534,7 @@ class ProcessManager
 
             $start = microtime(true);
 
-            $headersToReplace = ['X-PHP-PM-Remote-IP' => $incoming->getRemoteAddress()];
+            $headersToReplace = ['X-PHP-PM-Remote-IP' => parse_url($incoming->getRemoteAddress(), PHP_URL_HOST)];
             $headerRedirected = false;
 
             if ($this->isHeaderEnd($incomingBuffer)) {
@@ -631,8 +657,7 @@ class ProcessManager
      */
     protected function getNextSlave($cb)
     {
-        $that = $this;
-        $checkSlave = function () use ($cb, $that, &$checkSlave) {
+        $checkSlave = function () use ($cb, &$checkSlave) {
             $minConnections = null;
             $minPort = null;
 
@@ -691,7 +716,7 @@ class ProcessManager
                     if (!$this->isConnectionRegistered($conn)) {
                         // this connection is not registered, so it died during the ProcessSlave constructor.
                         $this->output->writeln(
-                            '<error>Worker permanent closed during PHP-PM bootstrap. Not so cool. ' .
+                            '<error>Worker permanently closed during PHP-PM bootstrap. Not so cool. ' .
                             'Not your fault, please create a ticket at github.com/php-pm/php-pm with' .
                             'the output of `ppm start -vv`.</error>'
                         );
@@ -744,8 +769,29 @@ class ProcessManager
             });
         }
         $conn->end(json_encode([
-            'slave_count' => $this->slaveCount
+            'slave_count' => $this->slaveCount,
+            'handled_requests' => $this->handledRequests,
+            'handled_requests_per_worker' => array_column($this->slaves, 'requests', 'port')
         ]));
+    }
+
+    /**
+     * A slave sent a `stop` command.
+     *
+     * @param array      $data
+     * @param Connection $conn
+     */
+    protected function commandStop(array $data, Connection $conn)
+    {
+        if ($this->output->isVeryVerbose()) {
+            $conn->on('close', function () {
+                $this->output->writeln('Stop command requested');
+            });
+        }
+
+        $conn->end(json_encode([]));
+
+        $this->shutdown(true);
     }
 
     /**
@@ -839,8 +885,9 @@ class ProcessManager
             } else {
                 $this->output->writeln(
                     sprintf(
-                        "<info>%d workers (starting at 5501) up and ready. Application is ready at http://%s:%s/</info>",
+                        "<info>%d workers (starting at %d) up and ready. Application is ready at http://%s:%s/</info>",
                         $this->slaveCount,
+                        self::CONTROLLER_PORT+1,
                         $this->host,
                         $this->port
                     )
@@ -992,9 +1039,9 @@ class ProcessManager
     }
 
     /**
-     * Closes all salves, so we automatically reconnect. Necessary when watched files have changed.
+     * Closes all slaves, so we automatically reconnect. Necessary when watched files have changed.
      */
-    protected function restartWorker()
+    public function restartWorker()
     {
         if ($this->inReload) {
             return;
@@ -1035,7 +1082,7 @@ class ProcessManager
      *
      * @param integer $port
      */
-    function newInstance($port)
+    protected function newInstance($port)
     {
         if ($this->inShutdown) {
             //when we are in the shutdown phase, we close all connections

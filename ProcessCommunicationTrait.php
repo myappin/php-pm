@@ -51,7 +51,7 @@ trait ProcessCommunicationTrait
                 function ($data) use ($conn, &$buffer) {
                     $buffer .= $data;
 
-                    if (substr($buffer, -1) === PHP_EOL) {
+                    if (substr($buffer, -strlen(PHP_EOL)) === PHP_EOL) {
                         foreach (explode(PHP_EOL, $buffer) as $message) {
                             if ($message) {
                                 $this->processMessage($message, $conn);
@@ -104,7 +104,7 @@ trait ProcessCommunicationTrait
         }
 
         if (!is_dir($run) && !mkdir($run, 0777, true)) {
-            throw new \RuntimeException(sprintf('Could not create %d folder.', $run));
+            throw new \RuntimeException(sprintf('Could not create %s folder.', $run));
         }
 
         $sock = $run. $affix . '.sock';
